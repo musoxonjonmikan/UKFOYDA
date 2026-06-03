@@ -343,24 +343,18 @@ import asyncio
 def main():
     init_db()
 
-    async def run():
-        app = Application.builder().token(BOT_TOKEN).build()
+    app = Application.builder().token(BOT_TOKEN).build()
 
-        app.add_handler(CommandHandler("start", start))
-        app.add_handler(CallbackQueryHandler(check_subs, pattern="^check_subs$"))
-        app.add_handler(ChatJoinRequestHandler(handle_join_request))
-        app.add_handler(CommandHandler("odam", odam_command))
-        app.add_handler(CommandHandler("xabar", xabar_command))
-        app.add_handler(CommandHandler("clear", clear_command))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(check_subs, pattern="^check_subs$"))
+    app.add_handler(ChatJoinRequestHandler(handle_join_request))
+    app.add_handler(CommandHandler("odam", odam_command))
+    app.add_handler(CommandHandler("xabar", xabar_command))
+    app.add_handler(CommandHandler("clear", clear_command))
 
-        logger.info("Polling mode")
-        await app.initialize()
-        await app.start()
-        await app.updater.start_polling(drop_pending_updates=True)
+    logger.info("Polling mode")
 
-        await app.updater.idle()
-
-    asyncio.run(run())
+    app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
