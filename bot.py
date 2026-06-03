@@ -1,12 +1,8 @@
 import os
 import logging
 import asyncio
-import ssl
 from typing import Optional
-from urllib.parse import urlparse
-
-import pg8000.dbapi as pg
-
+from pymongo import MongoClient
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -41,203 +37,102 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ─── Database connection ───────────────────────────────────────────────────────
+# ─── MongoDB connection ───────────────────────────────────────────────────────
 
-def _parse_db_url(url: str) -> dict:
-    r = urlparse(url)
-    params = dict(
-        host=r.hostname,
-        port=r.port or 5432,
-        database=r.path.lstrip("/"),
-        user=r.username,
-        password=r.password,
-    )
-    if "sslmode=disable" not in url:
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        params["ssl_context"] = ctx
-    return params
+MONGO_URI = os.environ["DATABASE_URL"]
 
+client = MongoClient(MONGO_URI)
+db = client["bot_db"]
 
-_DB_PARAMS = _parse_db_url(DATABASE_URL)
-
-
-def _connect():
-    return pg.connect(**_DB_PARAMS)
-
-
-def _row_to_dict(cursor, row) -> Optional[dict]:
-    if row is None:
-        return None
-    cols = [d[0] for d in cursor.description]
-    return dict(zip(cols, row))
+users_col = db["bot_users"]
+join_col = db["join_requests"]
 
 
 # ─── DB setup ─────────────────────────────────────────────────────────────────
 
 def init_db():
-    conn = _connect()
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS bot_users (
-            telegram_id    BIGINT PRIMARY KEY,
-            username       TEXT,
-            first_name     TEXT NOT NULL,
-            started_at     TIMESTAMP DEFAULT NOW(),
-            is_verified    BOOLEAN DEFAULT FALSE,
-            invited_by     BIGINT,
-            referral_count INTEGER DEFAULT 0,
-            join_link_sent BOOLEAN DEFAULT FALSE
-        )
-    """)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS join_requests (
-            id           SERIAL PRIMARY KEY,
-            user_id      BIGINT NOT NULL,
-            chat_id      BIGINT NOT NULL,
-            requested_at TIMESTAMP DEFAULT NOW(),
-            UNIQUE(user_id, chat_id)
-        )
-    """)
-    conn.commit()
-    cur.close()
-    conn.close()
-    logger.info("Database initialised")
+    logger.info("MongoDB connected (no schema required)")
 
 
 # ─── DB helpers ───────────────────────────────────────────────────────────────
 
-def upsert_user(telegram_id: int, username: Optional[str], first_name: str,
-                invited_by: Optional[int] = None) -> Optional[dict]:
-    conn = _connect()
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO bot_users (telegram_id, username, first_name, invited_by)
-        VALUES (%s, %s, %s, %s)
-        ON CONFLICT (telegram_id) DO UPDATE SET
-            username   = EXCLUDED.username,
-            first_name = EXCLUDED.first_name,
-            invited_by = CASE
-                WHEN bot_users.invited_by IS NULL THEN EXCLUDED.invited_by
-                ELSE bot_users.invited_by
-            END
-        RETURNING *
-    """, (telegram_id, username, first_name, invited_by))
-    row = _row_to_dict(cur, cur.fetchone())
-    conn.commit()
-    cur.close()
-    conn.close()
-    return row
+def upsert_user(telegram_id: int, username, first_name, invited_by=None):
+    return users_col.find_one_and_update(
+        {"telegram_id": telegram_id},
+        {
+            "$set": {
+                "username": username,
+                "first_name": first_name,
+            },
+            "$setOnInsert": {
+                "telegram_id": telegram_id,
+                "is_verified": False,
+                "referral_count": 0,
+                "join_link_sent": False,
+                "invited_by": invited_by,
+            }
+        },
+        upsert=True
+    )
 
-
-def get_user(telegram_id: int) -> Optional[dict]:
-    conn = _connect()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM bot_users WHERE telegram_id = %s", (telegram_id,))
-    row = _row_to_dict(cur, cur.fetchone())
-    cur.close()
-    conn.close()
-    return row
+def get_user(telegram_id: int):
+    return users_col.find_one({"telegram_id": telegram_id})
 
 
 def set_verified(telegram_id: int):
-    conn = _connect()
-    cur = conn.cursor()
-    cur.execute("UPDATE bot_users SET is_verified = TRUE WHERE telegram_id = %s", (telegram_id,))
-    conn.commit()
-    cur.close()
-    conn.close()
+    users_col.update_one(
+        {"telegram_id": telegram_id},
+        {"$set": {"is_verified": True}}
+    )
 
 
 def set_join_link_sent(telegram_id: int):
-    conn = _connect()
-    cur = conn.cursor()
-    cur.execute("UPDATE bot_users SET join_link_sent = TRUE WHERE telegram_id = %s", (telegram_id,))
-    conn.commit()
-    cur.close()
-    conn.close()
+    users_col.update_one(
+        {"telegram_id": telegram_id},
+        {"$set": {"join_link_sent": True}}
+    )
 
 
 def increment_referral_count(telegram_id: int) -> int:
-    conn = _connect()
-    cur = conn.cursor()
-    cur.execute(
-        "UPDATE bot_users SET referral_count = referral_count + 1 "
-        "WHERE telegram_id = %s RETURNING referral_count",
-        (telegram_id,),
+    res = users_col.find_one_and_update(
+        {"telegram_id": telegram_id},
+        {"$inc": {"referral_count": 1}},
+        return_document=True
     )
-    row = cur.fetchone()
-    conn.commit()
-    cur.close()
-    conn.close()
-    return row[0] if row else 0
+    return res.get("referral_count", 0)
 
 
 def record_join_request(user_id: int, chat_id: int):
-    conn = _connect()
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO join_requests (user_id, chat_id) VALUES (%s, %s) "
-        "ON CONFLICT (user_id, chat_id) DO NOTHING",
-        (user_id, chat_id),
+    join_col.update_one(
+        {"user_id": user_id, "chat_id": chat_id},
+        {"$setOnInsert": {"user_id": user_id, "chat_id": chat_id}},
+        upsert=True
     )
-    conn.commit()
-    cur.close()
-    conn.close()
 
 
 def has_join_request(user_id: int, chat_id: int) -> bool:
-    conn = _connect()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT id FROM join_requests WHERE user_id = %s AND chat_id = %s",
-        (user_id, chat_id),
-    )
-    row = cur.fetchone()
-    cur.close()
-    conn.close()
-    return row is not None
-
+    return join_col.find_one({"user_id": user_id, "chat_id": chat_id}) is not None
 
 def get_total_user_count() -> int:
-    conn = _connect()
-    cur = conn.cursor()
-    cur.execute("SELECT COUNT(*) FROM bot_users")
-    row = cur.fetchone()
-    cur.close()
-    conn.close()
-    return row[0] if row else 0
+    return users_col.count_documents({})
 
 
 def get_all_user_ids() -> list:
-    conn = _connect()
-    cur = conn.cursor()
-    cur.execute("SELECT telegram_id FROM bot_users")
-    rows = [r[0] for r in cur.fetchall()]
-    cur.close()
-    conn.close()
-    return rows
+    return [u["telegram_id"] for u in users_col.find({}, {"telegram_id": 1})]
 
 
 def clear_all_referrals() -> int:
-    conn = _connect()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM join_requests")
-    cur.execute("""
-        UPDATE bot_users SET
-            is_verified    = FALSE,
-            referral_count = 0,
-            join_link_sent = FALSE,
-            invited_by     = NULL
-    """)
-    cur.execute("SELECT COUNT(*) FROM bot_users")
-    row = cur.fetchone()
-    conn.commit()
-    cur.close()
-    conn.close()
-    return row[0] if row else 0
-
+    join_col.delete_many({})
+    users_col.update_many(
+        {},
+        {"$set": {
+            "is_verified": False,
+            "referral_count": 0,
+            "join_link_sent": False,
+            "invited_by": None
+        }}
+    )
+    return users_col.count_documents({})
 
 # ─── Bot helpers ──────────────────────────────────────────────────────────────
 
