@@ -349,21 +349,8 @@ def main():
     app.add_handler(CommandHandler("xabar", xabar_command))
     app.add_handler(CommandHandler("clear", clear_command))
 
-    if WEBHOOK_URL:
-        webhook_path = f"/webhook/{BOT_TOKEN}"
-        full_url = f"{WEBHOOK_URL}{webhook_path}"
-        logger.info(f"Webhook mode: {full_url}")
-        app.run_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            webhook_url=full_url,
-            url_path=webhook_path,
-            drop_pending_updates=True,
-        )
-    else:
-        logger.info("Polling mode")
-        app.run_polling(drop_pending_updates=True)
-
+    logger.info("Polling mode")
+app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
