@@ -338,19 +338,30 @@ async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ─── Entry point ──────────────────────────────────────────────────────────────
 
+import asyncio
+
 def main():
     init_db()
 
-    app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(check_subs, pattern="^check_subs$"))
-    app.add_handler(ChatJoinRequestHandler(handle_join_request))
-    app.add_handler(CommandHandler("odam", odam_command))
-    app.add_handler(CommandHandler("xabar", xabar_command))
-    app.add_handler(CommandHandler("clear", clear_command))
+    async def run():
+        app = Application.builder().token(BOT_TOKEN).build()
 
-    logger.info("Polling mode")
-    app.run_polling(drop_pending_updates=True)
+        app.add_handler(CommandHandler("start", start))
+        app.add_handler(CallbackQueryHandler(check_subs, pattern="^check_subs$"))
+        app.add_handler(ChatJoinRequestHandler(handle_join_request))
+        app.add_handler(CommandHandler("odam", odam_command))
+        app.add_handler(CommandHandler("xabar", xabar_command))
+        app.add_handler(CommandHandler("clear", clear_command))
+
+        logger.info("Polling mode")
+        await app.initialize()
+        await app.start()
+        await app.updater.start_polling(drop_pending_updates=True)
+
+        await app.updater.idle()
+
+    asyncio.run(run())
+
 
 if __name__ == "__main__":
     main()
